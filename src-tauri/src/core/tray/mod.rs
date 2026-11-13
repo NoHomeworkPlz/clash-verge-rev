@@ -210,8 +210,7 @@ impl Tray {
                 .latest_arc()
                 .0
                 .get("mode")
-                .map(|val| val.as_str().unwrap_or("rule"))
-                .unwrap_or("rule")
+                .map_or("rule", |val| val.as_str().unwrap_or("rule"))
                 .to_owned()
         };
         let profiles_config = Config::profiles().await;
@@ -414,27 +413,23 @@ impl Tray {
 }
 
 fn create_hotkeys(hotkeys: &Option<Vec<String>>) -> HashMap<&str, &str> {
-    hotkeys
-        .as_ref()
-        .map(|h| {
-            h.iter()
-                .filter_map(|item| {
-                    let mut parts = item.split(',');
-                    match (parts.next(), parts.next()) {
-                        (Some(func), Some(key)) => {
-                            // 托盘菜单中的 `accelerator` 属性，在 Linux/Windows 中都不支持小键盘按键的解析
-                            if key.to_uppercase().contains("NUMPAD") {
-                                None
-                            } else {
-                                Some((func, key))
-                            }
-                        }
-                        _ => None,
+    hotkeys.as_ref().map_or_default(|h| {
+        h.iter()
+            .filter_map(|item| {
+                let mut parts = item.split(',');
+                match (parts.next(), parts.next()) {
+                    (Some(func), Some(key)) => {
+                        // 托盘菜单的 `accelerator` 在 Linux/Windows 下不支持小键盘按键，Windows 下也不支持 Win 键（前端上报为 `CMD`）
+                        let uppercase_key = key.to_uppercase();
+                        let unsupported =
+                            uppercase_key.contains("NUMPAD") || (cfg!(windows) && uppercase_key.contains("CMD"));
+                        if unsupported { None } else { Some((func, key)) }
                     }
-                })
-                .collect::<HashMap<&str, &str>>()
-        })
-        .unwrap_or_default()
+                    _ => None,
+                }
+            })
+            .collect::<HashMap<&str, &str>>()
+    })
 }
 
 fn create_profile_menu_item(
@@ -494,12 +489,14 @@ fn create_subcreate_proxy_menu_item(
                             .proxies
                             .get(proxy_str)
                             .and_then(|h| h.history.last())
-                            .map(|h| match h.delay {
-                                0 => "-ms".into(),
-                                delay if delay >= 10000 => "-ms".into(),
-                                _ => format!("{}ms", h.delay),
-                            })
-                            .unwrap_or_else(|| "-ms".into());
+                            .map_or_else(
+                                || "-ms".into(),
+                                |h| match h.delay {
+                                    0 => "-ms".into(),
+                                    delay if delay >= 10000 => "-ms".into(),
+                                    _ => format!("{}ms", h.delay),
+                                },
+                            );
 
                         let display_text = format!("{}   | {}", proxy_str, delay_text);
 
@@ -612,7 +609,7 @@ async fn create_tray_menu(
             config
                 .get("proxy-groups")
                 .and_then(|groups| groups.as_sequence())
-                .map(|groups| {
+                .map_or_default(|groups| {
                     groups
                         .iter()
                         .filter_map(|group| group.get("name"))
@@ -621,7 +618,6 @@ async fn create_tray_menu(
                         .map(|(index, name)| (name.into(), index))
                         .collect::<HashMap<String, usize>>()
                 })
-                .unwrap_or_default()
         });
 
         (proxy_nodes_data, runtime_proxy_groups_order)
@@ -637,7 +633,8 @@ async fn create_tray_menu(
         .tray_proxy_groups_display_mode
         .as_deref()
         .unwrap_or("default");
-    let include_proxy_groups = options.include_proxy_groups && tray_proxy_groups_display_mode != "disable";
+    let include_proxy_groups =
+        options.include_proxy_groups && verge_settings.tray_proxy_groups_display_mode.as_deref() != Some("disable");
 
     let proxy_group_order_map = runtime_proxy_groups_order;
 
@@ -1000,7 +997,9 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
                     Some((g, p)) => (g, p),
                     None => return,
                 };
-                feat::switch_proxy_node(group_name, proxy_name).await;
+                if let Err(err) = feat::switch_proxy_node(group_name, proxy_name, false).await {
+                    logging!(error, Type::Tray, "Failed to switch proxy: {err:#}");
+                }
             }
             _ => {
                 logging!(debug, Type::Tray, "Unhandled tray menu event: {:?}", event.id);
